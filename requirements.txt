@@ -2,3 +2,4 @@ python-telegram-bot>=20.7,<22.0
 python-dotenv==1.1.1
 google-genai>=1.30.0
 google-genai
+python-docx>=1.1.2

@@ -1,12 +1,13 @@
 import asyncio
-import json
 import os
 import re
 import tempfile
 from contextlib import suppress
+from datetime import datetime
 
 from telegram import Update
 from telegram.error import BadRequest
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -72,13 +73,26 @@ async def routing_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text('Faqat audio yoki matn yuborishingiz mumkin.')
             return ConversationHandler.END
 
-        result_json = await asyncio.to_thread(build_structured_note, config.gemini_api_key, source_text)
-        result_text = json.dumps(result_json, ensure_ascii=False, indent=2)
+        result_text = await asyncio.to_thread(build_structured_note, config.gemini_api_key, source_text)
 
         with suppress(BadRequest):
             await processing_msg.delete()
 
-        await update.message.reply_text(result_text)
+        cleaned_text = _normalize_plain_medical_text(result_text)
+        await update.message.reply_text(f'```text\n{cleaned_text}\n```', parse_mode=ParseMode.MARKDOWN)
+
+        docx_path = await asyncio.to_thread(_build_docx_from_markdown, cleaned_text)
+        try:
+            with open(docx_path, 'rb') as doc_file:
+                await update.message.reply_document(
+                    document=doc_file,
+                    filename=os.path.basename(docx_path),
+                    caption='WORD format tayyorlandi.',
+                )
+        finally:
+            if os.path.exists(docx_path):
+                with suppress(OSError):
+                    os.remove(docx_path)
     except GeminiServiceError as exc:
         with suppress(BadRequest):
             await processing_msg.delete()
@@ -142,6 +156,73 @@ async def _download_audio_to_temp(update: Update, context: ContextTypes.DEFAULT_
     await tg_file.download_to_drive(custom_path=temp_path)
 
     return temp_path
+
+
+def _build_docx_from_markdown(markdown_text: str) -> str:
+    from docx import Document
+    from docx.shared import Pt
+    from docx.oxml.ns import qn
+
+    cleaned = markdown_text.replace('```text', '').replace('```', '').strip()
+    document = Document()
+    style = document.styles['Normal']
+    style.font.name = 'Times New Roman'
+    style.font.size = Pt(14)
+    style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
+
+    previous_was_blank = False
+    section_pattern = re.compile(r'^(\d+\.\s+[A-ZА-ЯЁʻ\'\-\s]+):\s*(.+)$')
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if not previous_was_blank:
+                document.add_paragraph('')
+            previous_was_blank = True
+            continue
+
+        previous_was_blank = False
+        section_match = section_pattern.match(line)
+        if section_match:
+            heading_text = section_match.group(1)
+            body_text = section_match.group(2)
+            heading_paragraph = document.add_paragraph()
+            heading_run = heading_paragraph.add_run(heading_text)
+            heading_run.bold = True
+            heading_run.font.name = 'Times New Roman'
+            heading_run.font.size = Pt(14)
+
+            body_paragraph = document.add_paragraph()
+            body_run = body_paragraph.add_run(body_text)
+            body_run.font.name = 'Times New Roman'
+            body_run.font.size = Pt(14)
+            continue
+
+        paragraph = document.add_paragraph()
+        tokens = re.split(r'(\*\*[^*]+\*\*)', line)
+        for token in tokens:
+            if not token:
+                continue
+            if token.startswith('**') and token.endswith('**') and len(token) > 4:
+                run = paragraph.add_run(token[2:-2])
+                run.bold = True
+            else:
+                run = paragraph.add_run(token)
+            run.font.name = 'Times New Roman'
+            run.font.size = Pt(14)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    file_path = os.path.join(tempfile.gettempdir(), f'tibbiy_hulosa_{timestamp}.docx')
+    document.save(file_path)
+    return file_path
+
+
+def _normalize_plain_medical_text(text: str) -> str:
+    cleaned_lines: list[str] = []
+    for line in text.replace('```text', '').replace('```', '').splitlines():
+        normalized = line.replace('**', '').replace('#', '').strip()
+        if normalized:
+            cleaned_lines.append(normalized)
+    return '\n'.join(cleaned_lines)
 
 
 def register_handlers(application: Application, config: BotConfig) -> None:
