@@ -28,6 +28,7 @@ from keyboards import (
 )
 
 WAIT_ROUTING_INPUT = 1
+TELEGRAM_TEXT_LIMIT = 3500
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -79,7 +80,8 @@ async def routing_input_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await processing_msg.delete()
 
         cleaned_text = _normalize_plain_medical_text(result_text)
-        await update.message.reply_text(f'```text\n{cleaned_text}\n```', parse_mode=ParseMode.MARKDOWN)
+        for chunk in _split_text_for_telegram(cleaned_text, TELEGRAM_TEXT_LIMIT):
+            await update.message.reply_text(f'```text\n{chunk}\n```', parse_mode=ParseMode.MARKDOWN)
 
         docx_path = await asyncio.to_thread(_build_docx_from_markdown, cleaned_text)
         try:
@@ -223,6 +225,36 @@ def _normalize_plain_medical_text(text: str) -> str:
         if normalized:
             cleaned_lines.append(normalized)
     return '\n'.join(cleaned_lines)
+
+
+def _split_text_for_telegram(text: str, limit: int) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in text.splitlines():
+        extra = len(line) + (1 if current else 0)
+        if current and current_len + extra > limit:
+            chunks.append('\n'.join(current))
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += extra
+
+    if current:
+        chunks.append('\n'.join(current))
+
+    normalized_chunks: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= limit:
+            normalized_chunks.append(chunk)
+            continue
+        for i in range(0, len(chunk), limit):
+            normalized_chunks.append(chunk[i:i + limit])
+    return normalized_chunks
 
 
 def register_handlers(application: Application, config: BotConfig) -> None:
